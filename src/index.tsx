@@ -86,10 +86,12 @@ const joinKeyboard = (channels: string[]) => ({
 const mainMenuKeyboard = {
   inline_keyboard: [
     [{ text: '💰 My Points', callback_data: 'my_points' }, { text: '🔗 My Referral Link', callback_data: 'ref_link' }],
-    [{ text: '🎁 Redeem Canva Invite (1 point)', callback_data: 'redeem' }],
+    [{ text: '🎁 Get Canva Invite (1 point)', callback_data: 'redeem' }],
     [{ text: 'ℹ️ How It Works', callback_data: 'help' }]
   ]
 }
+
+const EMAIL_RE = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/
 
 const mainMenuText = (u: any) =>
   `🎨 <b>Canva Invite Bot</b>\n\n` +
@@ -152,34 +154,115 @@ const handleVerified = async (env: Bindings, user: any, botUsername: string, cha
     { reply_markup: mainMenuKeyboard })
 }
 
+// Step 1 of redeem: check points and ask for the user's email
 const handleRedeem = async (env: Bindings, user: any, chatId: number, cbId: string) => {
   const db = env.DB
-  const canvaLink = await getSetting(db, 'canva_link')
 
-  if (!canvaLink) {
-    await answerCallback(env.BOT_TOKEN, cbId, '⚠️ Invite link is not configured yet. Try again later.', true)
-    return
-  }
   if (user.points < 1) {
     await answerCallback(env.BOT_TOKEN, cbId, '❌ Not enough points! You need 1 point. Invite friends to earn points.', true)
     return
   }
 
-  await db.prepare('UPDATE users SET points = points - 1, total_redeemed = total_redeemed + 1 WHERE telegram_id = ?')
-    .bind(user.telegram_id).run()
-  await db.prepare('INSERT INTO redemptions (telegram_id, points_spent, invite_link) VALUES (?, 1, ?)')
-    .bind(user.telegram_id, canvaLink).run()
+  // Prevent stacking multiple pending requests
+  const pending = await db.prepare("SELECT id FROM redemptions WHERE telegram_id = ? AND status = 'pending'").bind(user.telegram_id).first<any>()
+  if (pending) {
+    await answerCallback(env.BOT_TOKEN, cbId, '⏳ You already have a pending invite request. Please wait for approval.', true)
+    return
+  }
 
-  await answerCallback(env.BOT_TOKEN, cbId, '🎉 Invite unlocked!')
+  await db.prepare('UPDATE users SET awaiting_email = 1 WHERE telegram_id = ?').bind(user.telegram_id).run()
+  await answerCallback(env.BOT_TOKEN, cbId)
   await sendMessage(env.BOT_TOKEN, chatId,
-    `🎁 <b>Your Canva Invite</b>\n\n` +
-    `Click the link below and sign in with <b>your own email</b> to join the Canva Pro team:\n\n` +
-    `🔗 ${canvaLink}\n\n` +
-    `✅ 1 point has been deducted.\n` +
-    `💡 Invite more friends to earn more points!`)
+    `📧 <b>Almost there!</b>\n\n` +
+    `Please send me the <b>Gmail address</b> you use for Canva.\n\n` +
+    `Example: <code>yourname@gmail.com</code>\n\n` +
+    `The admin will send a Canva Pro invite to this email. ✅\n` +
+    `<i>Type /cancel to cancel.</i>`)
+}
 
-  await notifyAdmins(env,
-    `🎁 <b>Invite redeemed</b>\nUser: ${user.first_name ?? ''} (@${user.username ?? 'no_username'})\nID: <code>${user.telegram_id}</code>`)
+// Step 2 of redeem: user submitted an email
+const handleEmailSubmission = async (env: Bindings, user: any, chatId: number, email: string) => {
+  const db = env.DB
+
+  if (user.points < 1) {
+    await db.prepare('UPDATE users SET awaiting_email = 0 WHERE telegram_id = ?').bind(user.telegram_id).run()
+    await sendMessage(env.BOT_TOKEN, chatId, '❌ Not enough points anymore. Invite friends to earn points!')
+    return
+  }
+
+  // Deduct point + create pending redemption
+  await db.prepare('UPDATE users SET points = points - 1, total_redeemed = total_redeemed + 1, awaiting_email = 0 WHERE telegram_id = ?')
+    .bind(user.telegram_id).run()
+  const r = await db.prepare("INSERT INTO redemptions (telegram_id, points_spent, email, status) VALUES (?, 1, ?, 'pending')")
+    .bind(user.telegram_id, email).run()
+  const redemptionId = r.meta.last_row_id
+
+  await sendMessage(env.BOT_TOKEN, chatId,
+    `✅ <b>Request submitted!</b>\n\n` +
+    `📧 Email: <code>${email}</code>\n` +
+    `💰 1 point deducted.\n\n` +
+    `⏳ The admin will send your Canva Pro invite soon. You'll get a message here when it's done! 🎨`)
+
+  // Notify all admins with action buttons
+  const ids = (env.ADMIN_IDS || '').split(',').map(s => s.trim()).filter(Boolean)
+  for (const adminId of ids) {
+    try {
+      await sendMessage(env.BOT_TOKEN, adminId,
+        `🎁 <b>New Canva Invite Request #${redemptionId}</b>\n\n` +
+        `👤 User: ${user.first_name ?? ''} (@${user.username ?? 'no_username'})\n` +
+        `🆔 ID: <code>${user.telegram_id}</code>\n` +
+        `📧 Email: <code>${email}</code>\n\n` +
+        `👉 Open Canva → People → Invite → paste this email, then tap a button:`,
+        { reply_markup: { inline_keyboard: [[
+          { text: '✅ Invite Sent', callback_data: `adm_done_${redemptionId}` },
+          { text: '❌ Reject (refund)', callback_data: `adm_rej_${redemptionId}` }
+        ]] } })
+    } catch {}
+  }
+}
+
+// Admin taps ✅/❌ on a redemption request
+const handleAdminDecision = async (env: Bindings, cb: any, action: 'done' | 'rej', redemptionId: number) => {
+  const db = env.DB
+  const token = env.BOT_TOKEN
+
+  const red = await db.prepare('SELECT * FROM redemptions WHERE id = ?').bind(redemptionId).first<any>()
+  if (!red) { await answerCallback(token, cb.id, '❌ Request not found.', true); return }
+  if (red.status !== 'pending') { await answerCallback(token, cb.id, `⚠️ Already handled (${red.status}).`, true); return }
+
+  if (action === 'done') {
+    await db.prepare("UPDATE redemptions SET status = 'done', handled_at = CURRENT_TIMESTAMP WHERE id = ?").bind(redemptionId).run()
+    await answerCallback(token, cb.id, '✅ Marked as done!')
+    try {
+      await sendMessage(token, red.telegram_id,
+        `🎉 <b>Your Canva Pro invite has been sent!</b>\n\n` +
+        `📧 Check the inbox of <code>${red.email}</code> (also check Spam folder).\n` +
+        `Open the email from Canva and accept the invite. Enjoy! 🎨\n\n` +
+        `💡 Invite more friends to earn more points!`)
+    } catch {}
+  } else {
+    // Refund the point
+    await db.prepare("UPDATE redemptions SET status = 'rejected', handled_at = CURRENT_TIMESTAMP WHERE id = ?").bind(redemptionId).run()
+    await db.prepare('UPDATE users SET points = points + 1, total_redeemed = total_redeemed - 1 WHERE telegram_id = ?').bind(red.telegram_id).run()
+    await answerCallback(token, cb.id, '❌ Rejected, point refunded.')
+    try {
+      await sendMessage(token, red.telegram_id,
+        `⚠️ Your Canva invite request for <code>${red.email}</code> was rejected.\n` +
+        `💰 Your 1 point has been <b>refunded</b>.\n\n` +
+        `Please check the email is correct and try again, or contact the admin.`)
+    } catch {}
+  }
+
+  // Update the admin message to reflect the decision
+  try {
+    await tg(token, 'editMessageText', {
+      chat_id: cb.message.chat.id,
+      message_id: cb.message.message_id,
+      parse_mode: 'HTML',
+      text: cb.message.text.replace(/👉[^]*$/, '') +
+        (action === 'done' ? `\n✅ <b>DONE</b> — invite sent to ${red.email}` : `\n❌ <b>REJECTED</b> — point refunded`)
+    })
+  } catch {}
 }
 
 // ============ Admin commands ============
@@ -273,14 +356,33 @@ const handleAdminCommand = async (env: Bindings, msg: any): Promise<boolean> => 
     return true
   }
 
+  if (text.startsWith('/pending')) {
+    const rows = await db.prepare("SELECT r.id, r.email, r.created_at, u.username, u.first_name, u.telegram_id FROM redemptions r JOIN users u ON u.telegram_id = r.telegram_id WHERE r.status = 'pending' ORDER BY r.id").all<any>()
+    const list = rows.results ?? []
+    if (!list.length) {
+      await sendMessage(env.BOT_TOKEN, chatId, '✅ No pending invite requests!')
+      return true
+    }
+    for (const r of list) {
+      await sendMessage(env.BOT_TOKEN, chatId,
+        `🎁 <b>Request #${r.id}</b>\n👤 ${r.first_name ?? ''} (@${r.username ?? 'no_username'})\n📧 <code>${r.email}</code>\n🕐 ${r.created_at}`,
+        { reply_markup: { inline_keyboard: [[
+          { text: '✅ Invite Sent', callback_data: `adm_done_${r.id}` },
+          { text: '❌ Reject (refund)', callback_data: `adm_rej_${r.id}` }
+        ]] } })
+    }
+    return true
+  }
+
   if (text.startsWith('/admin')) {
     await sendMessage(env.BOT_TOKEN, chatId,
       `🛠 <b>Admin Commands</b>\n\n` +
-      `<code>/setlink URL</code> — set Canva invite link\n` +
+      `<code>/pending</code> — list pending invite requests\n` +
       `<code>/setchannels @ch1 @ch2</code> — set required channels\n` +
       `<code>/stats</code> — bot statistics\n` +
       `<code>/addpoints ID N</code> — add/remove points\n` +
-      `<code>/broadcast MSG</code> — message all users`)
+      `<code>/broadcast MSG</code> — message all users\n` +
+      `<code>/setlink URL</code> — (optional) auto invite link mode`)
     return true
   }
 
@@ -299,6 +401,14 @@ const handleUpdate = async (env: Bindings, update: any) => {
     const chatId = cb.message?.chat?.id ?? from.id
     const user = await upsertUser(db, from, null)
     if (user.is_banned) { await answerCallback(token, cb.id, '🚫 You are banned.', true); return }
+
+    // Admin decision buttons (✅ done / ❌ reject)
+    const admMatch = (cb.data || '').match(/^adm_(done|rej)_(\d+)$/)
+    if (admMatch) {
+      if (!isAdmin(env, from.id)) { await answerCallback(token, cb.id, '🚫 Admins only.', true); return }
+      await handleAdminDecision(env, cb, admMatch[1] as 'done' | 'rej', parseInt(admMatch[2]))
+      return
+    }
 
     const channels = await getChannels(db)
     const me = await tg(token, 'getMe', {})
@@ -347,7 +457,7 @@ const handleUpdate = async (env: Bindings, update: any) => {
         `1️⃣ Join our channel(s) → get <b>+1 free point</b>\n` +
         `2️⃣ <b>1 point = 1 Canva Pro invite</b>\n` +
         `3️⃣ Share your referral link — each friend who joins bot + channels = <b>+1 point</b>\n` +
-        `4️⃣ Tap 🎁 Redeem to get your Canva invite link\n\n` +
+        `4️⃣ Tap 🎁 Get Canva Invite → send your Gmail → admin sends the invite to your email 📧\n\n` +
         `♾️ No limits — keep inviting, keep earning!`,
         { reply_markup: { inline_keyboard: [[{ text: '⬅️ Back to Menu', callback_data: 'back_menu' }]] } })
     }
@@ -362,9 +472,28 @@ const handleUpdate = async (env: Bindings, update: any) => {
   const text: string = msg.text.trim()
 
   // Admin commands
-  if (isAdmin(env, from.id) && text.startsWith('/') && !text.startsWith('/start')) {
+  if (isAdmin(env, from.id) && text.startsWith('/') && !text.startsWith('/start') && !text.startsWith('/cancel')) {
     const handled = await handleAdminCommand(env, msg)
     if (handled) return
+  }
+
+  // User is in "send me your email" state
+  const existingUser = await getUser(db, from.id)
+  if (existingUser?.awaiting_email) {
+    if (text.startsWith('/cancel')) {
+      await db.prepare('UPDATE users SET awaiting_email = 0 WHERE telegram_id = ?').bind(from.id).run()
+      await sendMessage(token, chatId, '❌ Cancelled. Your point was not used.', { reply_markup: mainMenuKeyboard })
+      return
+    }
+    if (!text.startsWith('/')) {
+      const email = text.toLowerCase()
+      if (!EMAIL_RE.test(email)) {
+        await sendMessage(token, chatId, '⚠️ That doesn\'t look like a valid email. Please send a valid address like <code>yourname@gmail.com</code>, or /cancel.')
+        return
+      }
+      await handleEmailSubmission(env, existingUser, chatId, email)
+      return
+    }
   }
 
   // /start with optional referral payload
