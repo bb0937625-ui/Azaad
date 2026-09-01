@@ -24,13 +24,34 @@ const INVITE_COST = 3 // points required for 1 Canva invite
 const sendMessage = (token: string, chat_id: number | string, text: string, extra: any = {}) =>
   tg(token, 'sendMessage', { chat_id, text, parse_mode: 'HTML', disable_web_page_preview: true, ...extra })
 
-// Edit a message in place (clean chat). Falls back to sending a new message if editing fails.
-const editOrSend = async (token: string, chat_id: number | string, message_id: number | undefined, text: string, extra: any = {}) => {
+// Edit a message in place (clean chat). Handles both text messages and photo captions.
+const editOrSend = async (token: string, chat_id: number | string, message_id: number | undefined, text: string, extra: any = {}, isPhoto = false) => {
   if (message_id) {
-    const res = await tg(token, 'editMessageText', { chat_id, message_id, text, parse_mode: 'HTML', disable_web_page_preview: true, ...extra })
+    const method = isPhoto ? 'editMessageCaption' : 'editMessageText'
+    const payload: any = isPhoto
+      ? { chat_id, message_id, caption: text, parse_mode: 'HTML', ...extra }
+      : { chat_id, message_id, text, parse_mode: 'HTML', disable_web_page_preview: true, ...extra }
+    const res = await tg(token, method, payload)
     if (res.ok || (res.description || '').includes('message is not modified')) return res
   }
   return sendMessage(token, chat_id, text, extra)
+}
+
+// Send the branded banner photo with caption + keyboard. Caches Telegram file_id after first upload.
+const sendBannerMsg = async (env: Bindings, chatId: number | string, caption: string, reply_markup: any, origin: string) => {
+  const cached = await getSetting(env.DB, 'banner_file_id')
+  const photo = cached || `${origin}/static/banner.jpg`
+  const res = await tg(env.BOT_TOKEN, 'sendPhoto', { chat_id: chatId, photo, caption, parse_mode: 'HTML', reply_markup })
+  if (res.ok) {
+    if (!cached) {
+      const sizes = res.result?.photo
+      const fileId = sizes?.[sizes.length - 1]?.file_id
+      if (fileId) await setSetting(env.DB, 'banner_file_id', fileId)
+    }
+    return res
+  }
+  // Fallback to plain text if photo fails
+  return sendMessage(env.BOT_TOKEN, chatId, caption, { reply_markup })
 }
 
 const answerCallback = (token: string, id: string, text = '', show_alert = false) =>
@@ -113,14 +134,16 @@ const mainMenuText = (u: any) =>
   `<b>${INVITE_COST} points = 1 Canva Pro invite</b>\n` +
   `Each friend who joins via your link = +1 point!`
 
+const joinPromptText = (channels: string[]) =>
+  `🎨 <b>Welcome to Canva Invite Bot!</b>\n\n` +
+  `🆓 Get <b>Canva PRO</b> access for FREE!\n\n` +
+  `To start, join our channel${channels.length > 1 ? 's' : ''}:\n\n` +
+  channels.map((ch, i) => `${i + 1}️⃣ ${ch}`).join('\n') +
+  `\n\nThen tap <b>✅ I Joined — Check</b>`
+
 // ============ Core flows ============
-const sendJoinPrompt = async (env: Bindings, chatId: number, channels: string[]) => {
-  await sendMessage(env.BOT_TOKEN, chatId,
-    `🎨 <b>Welcome to Canva Invite Bot!</b>\n\n` +
-    `To use this bot you must join our channel${channels.length > 1 ? 's' : ''}:\n\n` +
-    channels.map((ch, i) => `${i + 1}. ${ch}`).join('\n') +
-    `\n\nAfter joining, tap <b>✅ I Joined — Check</b>`,
-    { reply_markup: joinKeyboard(channels) })
+const sendJoinPrompt = async (env: Bindings, chatId: number, channels: string[], origin: string) => {
+  await sendBannerMsg(env, chatId, joinPromptText(channels), joinKeyboard(channels), origin)
 }
 
 const notifyAdmins = async (env: Bindings, text: string) => {
@@ -131,7 +154,7 @@ const notifyAdmins = async (env: Bindings, text: string) => {
 }
 
 // Award welcome bonus + referral point after verified join
-const handleVerified = async (env: Bindings, user: any, botUsername: string, chatId: number, editMsgId?: number) => {
+const handleVerified = async (env: Bindings, user: any, botUsername: string, chatId: number, origin: string, editMsgId?: number, isPhoto = false) => {
   const db = env.DB
   let bonusMsg = ''
 
@@ -160,14 +183,17 @@ const handleVerified = async (env: Bindings, user: any, botUsername: string, cha
   }
 
   const fresh = await getUser(db, user.telegram_id)
-  await editOrSend(env.BOT_TOKEN, chatId, editMsgId,
-    `✅ <b>Verified!</b> ${bonusMsg}\n` + mainMenuText(fresh) +
-    `\n\n🔗 Your referral link:\n<code>https://t.me/${botUsername}?start=ref_${user.telegram_id}</code>`,
-    { reply_markup: mainMenuKeyboard })
+  const text = `✅ <b>Verified!</b> ${bonusMsg}\n` + mainMenuText(fresh) +
+    `\n\n🔗 Your referral link:\n<code>https://t.me/${botUsername}?start=ref_${user.telegram_id}</code>`
+  if (editMsgId) {
+    await editOrSend(env.BOT_TOKEN, chatId, editMsgId, text, { reply_markup: mainMenuKeyboard }, isPhoto)
+  } else {
+    await sendBannerMsg(env, chatId, text, mainMenuKeyboard, origin)
+  }
 }
 
 // Step 1 of redeem: check points and ask for the user's email
-const handleRedeem = async (env: Bindings, user: any, chatId: number, cbId: string, editMsgId?: number) => {
+const handleRedeem = async (env: Bindings, user: any, chatId: number, cbId: string, editMsgId?: number, isPhoto = false) => {
   const db = env.DB
 
   if (user.points < INVITE_COST) {
@@ -189,7 +215,7 @@ const handleRedeem = async (env: Bindings, user: any, chatId: number, cbId: stri
     `Send me the <b>Gmail address</b> you use for Canva.\n\n` +
     `Example: <code>yourname@gmail.com</code>\n\n` +
     `💰 Cost: <b>${INVITE_COST} points</b> • The admin will send the invite to your email. ✅`,
-    { reply_markup: { inline_keyboard: [[{ text: '❌ Cancel', callback_data: 'cancel_email' }]] } })
+    { reply_markup: { inline_keyboard: [[{ text: '❌ Cancel', callback_data: 'cancel_email' }]] } }, isPhoto)
 }
 
 // Step 2 of redeem: user submitted an email
@@ -403,7 +429,7 @@ const handleAdminCommand = async (env: Bindings, msg: any): Promise<boolean> => 
 }
 
 // ============ Update handler ============
-const handleUpdate = async (env: Bindings, update: any) => {
+const handleUpdate = async (env: Bindings, update: any, origin: string) => {
   const db = env.DB
   const token = env.BOT_TOKEN
 
@@ -427,6 +453,7 @@ const handleUpdate = async (env: Bindings, update: any) => {
     const me = await tg(token, 'getMe', {})
     const botUsername = me.result.username
     const msgId: number | undefined = cb.message?.message_id
+    const isPhoto = Array.isArray(cb.message?.photo) && cb.message.photo.length > 0
 
     if (cb.data === 'check_join') {
       if (!channels.length) { await answerCallback(token, cb.id, '⚠️ Bot not configured yet.', true); return }
@@ -436,7 +463,7 @@ const handleUpdate = async (env: Bindings, update: any) => {
         return
       }
       await answerCallback(token, cb.id, '✅ Verified!')
-      await handleVerified(env, user, botUsername, chatId, msgId)
+      await handleVerified(env, user, botUsername, chatId, origin, msgId, isPhoto)
       return
     }
 
@@ -444,7 +471,7 @@ const handleUpdate = async (env: Bindings, update: any) => {
       await db.prepare('UPDATE users SET awaiting_email = 0 WHERE telegram_id = ?').bind(from.id).run()
       await answerCallback(token, cb.id, '❌ Cancelled. No points used.')
       const fresh = await getUser(db, from.id)
-      await editOrSend(token, chatId, msgId, mainMenuText(fresh), { reply_markup: mainMenuKeyboard })
+      await editOrSend(token, chatId, msgId, mainMenuText(fresh), { reply_markup: mainMenuKeyboard }, isPhoto)
       return
     }
 
@@ -453,11 +480,7 @@ const handleUpdate = async (env: Bindings, update: any) => {
       const check = await checkJoinedAll(token, channels, from.id)
       if (!check.ok) {
         await answerCallback(token, cb.id, '❌ You left a required channel! Join again to continue.', true)
-        await editOrSend(token, chatId, msgId,
-          `🎨 <b>Canva Invite Bot</b>\n\nYou must be a member of our channel${channels.length > 1 ? 's' : ''}:\n\n` +
-          channels.map((ch, i) => `${i + 1}. ${ch}`).join('\n') +
-          `\n\nAfter joining, tap <b>✅ I Joined — Check</b>`,
-          { reply_markup: joinKeyboard(channels) })
+        await editOrSend(token, chatId, msgId, joinPromptText(channels), { reply_markup: joinKeyboard(channels) }, isPhoto)
         return
       }
     }
@@ -465,7 +488,7 @@ const handleUpdate = async (env: Bindings, update: any) => {
     if (cb.data === 'my_points' || cb.data === 'back_menu') {
       await answerCallback(token, cb.id, '🔄 Updated!')
       const fresh = await getUser(db, from.id)
-      await editOrSend(token, chatId, msgId, mainMenuText(fresh), { reply_markup: mainMenuKeyboard })
+      await editOrSend(token, chatId, msgId, mainMenuText(fresh), { reply_markup: mainMenuKeyboard }, isPhoto)
     } else if (cb.data === 'ref_link') {
       await answerCallback(token, cb.id)
       await editOrSend(token, chatId, msgId,
@@ -474,10 +497,10 @@ const handleUpdate = async (env: Bindings, update: any) => {
         `👆 Tap the link to copy it, then share with friends!\n\n` +
         `💰 Each friend who joins the bot <b>and</b> all channels = <b>+1 point</b>\n` +
         `🎁 Collect <b>${INVITE_COST} points</b> → 1 Canva Pro invite! 🎨`,
-        { reply_markup: { inline_keyboard: [[{ text: '⬅️ Back to Menu', callback_data: 'back_menu' }]] } })
+        { reply_markup: { inline_keyboard: [[{ text: '⬅️ Back to Menu', callback_data: 'back_menu' }]] } }, isPhoto)
     } else if (cb.data === 'redeem') {
       const fresh = await getUser(db, from.id)
-      await handleRedeem(env, fresh, chatId, cb.id, msgId)
+      await handleRedeem(env, fresh, chatId, cb.id, msgId, isPhoto)
     } else if (cb.data === 'help') {
       await answerCallback(token, cb.id)
       await editOrSend(token, chatId, msgId,
@@ -487,7 +510,7 @@ const handleUpdate = async (env: Bindings, update: any) => {
         `3️⃣ Collect <b>${INVITE_COST} points</b> = 1 Canva Pro invite\n` +
         `4️⃣ Tap 🎁 Get Canva Invite → send your Gmail → invite arrives in your email 📧\n\n` +
         `♾️ No limits — keep inviting, keep earning!`,
-        { reply_markup: { inline_keyboard: [[{ text: '⬅️ Back to Menu', callback_data: 'back_menu' }]] } })
+        { reply_markup: { inline_keyboard: [[{ text: '⬅️ Back to Menu', callback_data: 'back_menu' }]] } }, isPhoto)
     }
     return
   }
@@ -550,12 +573,12 @@ const handleUpdate = async (env: Bindings, update: any) => {
 
     const check = await checkJoinedAll(token, channels, from.id)
     if (!check.ok) {
-      await sendJoinPrompt(env, chatId, channels)
+      await sendJoinPrompt(env, chatId, channels, origin)
       return
     }
 
     const me = await tg(token, 'getMe', {})
-    await handleVerified(env, user, me.result.username, chatId)
+    await handleVerified(env, user, me.result.username, chatId, origin)
     return
   }
 
@@ -571,8 +594,9 @@ app.post('/webhook', async (c) => {
     return c.text('Unauthorized', 401)
   }
   const update = await c.req.json()
+  const origin = new URL(c.req.url).origin
   try {
-    await handleUpdate(c.env, update)
+    await handleUpdate(c.env, update, origin)
   } catch (e: any) {
     console.log('Error handling update:', e?.message)
   }
@@ -588,12 +612,15 @@ app.get('/', async (c) => {
 <title>Canva Invite Bot</title>
 <script src="https://cdn.tailwindcss.com"></script>
 </head>
-<body class="bg-gradient-to-br from-purple-600 to-blue-500 min-h-screen flex items-center justify-center">
-<main class="bg-white rounded-2xl shadow-2xl p-10 max-w-md text-center" id="status-card">
-  <h1 class="text-3xl font-bold text-gray-800 mb-4">🎨 Canva Invite Bot</h1>
-  <p class="text-gray-600 mb-6">Telegram referral bot — earn points, redeem Canva Pro invites.</p>
-  <a href="https://t.me/COCKROACHCANVA_bot" class="inline-block bg-blue-500 hover:bg-blue-600 text-white font-semibold px-6 py-3 rounded-xl transition" id="open-bot-link">Open Bot on Telegram →</a>
-  <p class="text-green-600 mt-6 font-medium">✅ Webhook service is running</p>
+<body class="bg-gradient-to-br from-purple-900 via-purple-700 to-amber-500 min-h-screen flex items-center justify-center p-4">
+<main class="bg-white/95 backdrop-blur rounded-3xl shadow-2xl overflow-hidden max-w-lg text-center" id="status-card">
+  <img src="/static/banner.jpg" alt="Canva PRO Free Access — Cockroach mascot banner" class="w-full" id="brand-banner">
+  <section class="p-8" id="hero-section">
+    <h1 class="text-3xl font-extrabold text-gray-800 mb-3">🎨 Canva Invite Bot</h1>
+    <p class="text-gray-600 mb-6">Earn points by inviting friends → redeem <span class="font-bold text-purple-700">Canva PRO</span> invites!</p>
+    <a href="https://t.me/COCKROACHCANVA_bot" class="inline-block bg-gradient-to-r from-purple-600 to-amber-500 hover:from-purple-700 hover:to-amber-600 text-white font-bold px-8 py-3 rounded-xl transition shadow-lg" id="open-bot-link">Open Bot on Telegram →</a>
+    <p class="text-green-600 mt-6 font-medium">✅ Webhook service is running</p>
+  </section>
 </main>
 </body>
 </html>`)
