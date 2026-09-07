@@ -31,6 +31,10 @@ const PRODUCTS: Record<string, Product> = {
   aifiesta: {
     id: 'aifiesta', name: 'AI Fiesta — 1 Month', emoji: '🤖', cost: 4,
     deliverText: 'Check the inbox — your AI Fiesta 1-month access details have been sent to your email.'
+  },
+  gptplus: {
+    id: 'gptplus', name: 'GPT Plus — 12 Months', emoji: '🧠', cost: 6,
+    deliverText: 'Check the inbox — your GPT Plus 12-month unlock details have been sent to your email.'
   }
 }
 
@@ -133,6 +137,7 @@ const mainMenuKeyboard = {
     [{ text: '🔄 Refresh', callback_data: 'my_points' }, { text: '🔗 My Referral Link', callback_data: 'ref_link' }],
     [{ text: `🎨 Canva Pro (${PRODUCTS.canva.cost} pts)`, callback_data: 'redeem_canva' }],
     [{ text: `🤖 AI Fiesta 1 Month (${PRODUCTS.aifiesta.cost} pts)`, callback_data: 'redeem_aifiesta' }],
+    [{ text: `🧠 GPT Plus 12 Months (${PRODUCTS.gptplus.cost} pts)`, callback_data: 'redeem_gptplus' }],
     [{ text: 'ℹ️ How It Works', callback_data: 'help' }]
   ]
 }
@@ -147,7 +152,8 @@ const mainMenuText = (u: any) =>
   `🎁 Rewards claimed: <b>${u.total_redeemed}</b>\n\n` +
   `🛒 <b>Rewards Shop:</b>\n` +
   `🎨 Canva Pro Invite — <b>${PRODUCTS.canva.cost} points</b>\n` +
-  `🤖 AI Fiesta 1 Month — <b>${PRODUCTS.aifiesta.cost} points</b>\n\n` +
+  `🤖 AI Fiesta 1 Month — <b>${PRODUCTS.aifiesta.cost} points</b>\n` +
+  `🧠 GPT Plus 12 Months — <b>${PRODUCTS.gptplus.cost} points</b>\n\n` +
   `Each friend who joins via your link = <b>+1 point</b>!`
 
 const joinPromptText = (channels: string[]) =>
@@ -519,10 +525,10 @@ const handleUpdate = async (env: Bindings, update: any, origin: string) => {
         `<code>https://t.me/${botUsername}?start=ref_${from.id}</code>\n\n` +
         `👆 Tap the link to copy it, then share with friends!\n\n` +
         `💰 Each friend who joins the bot <b>and</b> all channels = <b>+1 point</b>\n` +
-        `🎨 ${PRODUCTS.canva.cost} pts = Canva Pro • 🤖 ${PRODUCTS.aifiesta.cost} pts = AI Fiesta 1 Month!`,
+        `🎨 ${PRODUCTS.canva.cost} pts = Canva Pro • 🤖 ${PRODUCTS.aifiesta.cost} pts = AI Fiesta • 🧠 ${PRODUCTS.gptplus.cost} pts = GPT Plus 12mo!`,
         { reply_markup: { inline_keyboard: [[{ text: '⬅️ Back to Menu', callback_data: 'back_menu' }]] } }, isPhoto)
-    } else if (cb.data === 'redeem_canva' || cb.data === 'redeem_aifiesta' || cb.data === 'redeem') {
-      const product = cb.data === 'redeem_aifiesta' ? PRODUCTS.aifiesta : PRODUCTS.canva
+    } else if (cb.data === 'redeem_canva' || cb.data === 'redeem_aifiesta' || cb.data === 'redeem_gptplus' || cb.data === 'redeem') {
+      const product = cb.data === 'redeem_aifiesta' ? PRODUCTS.aifiesta : cb.data === 'redeem_gptplus' ? PRODUCTS.gptplus : PRODUCTS.canva
       const fresh = await getUser(db, from.id)
       await handleRedeem(env, fresh, chatId, cb.id, product, msgId, isPhoto)
     } else if (cb.data === 'help') {
@@ -534,6 +540,7 @@ const handleUpdate = async (env: Bindings, update: any, origin: string) => {
         `3️⃣ Spend points in the 🛒 Rewards Shop:\n` +
         `   🎨 Canva Pro Invite — ${PRODUCTS.canva.cost} pts\n` +
         `   🤖 AI Fiesta 1 Month — ${PRODUCTS.aifiesta.cost} pts\n` +
+        `   🧠 GPT Plus 12 Months — ${PRODUCTS.gptplus.cost} pts\n` +
         `4️⃣ Send your Gmail → reward arrives in your email 📧\n\n` +
         `♾️ No limits — keep inviting, keep earning!`,
         { reply_markup: { inline_keyboard: [[{ text: '⬅️ Back to Menu', callback_data: 'back_menu' }]] } }, isPhoto)

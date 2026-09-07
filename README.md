@@ -11,6 +11,7 @@
 |--------|------|
 | 🎨 Canva Pro Invite | 3 points |
 | 🤖 AI Fiesta — 1 Month | 4 points |
+| 🧠 GPT Plus — 12 Months | 6 points |
 
 ## How It Works
 1. User starts the bot → must join required channel(s) → gets **+1 welcome point**
@@ -23,7 +24,7 @@
 - ✅ Forced channel-join verification (via `getChatMember`, bot must be channel admin)
 - ✅ Referral system with anti-self-referral and once-per-user counting
 - ✅ Points economy: +1 welcome, +1 per referral; per-product costs with accurate refunds on reject
-- ✅ Multi-product rewards shop (Canva Pro 3 pts, AI Fiesta 1-month 4 pts) — easily extensible catalog
+- ✅ Multi-product rewards shop (Canva Pro 3 pts, AI Fiesta 4 pts, GPT Plus 12-month 6 pts) — easily extensible catalog
 - ✅ Email collection flow with validation, cancel button, one-pending-request limit
 - ✅ Admin approval workflow with inline ✅/❌ buttons and in-place message updates
 - ✅ Clean-chat UI: menus edit in place (photo caption editing) instead of stacking messages
