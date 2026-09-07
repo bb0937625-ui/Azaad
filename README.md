@@ -1,23 +1,29 @@
-# 🪳 Canva Invite Bot (Telegram)
+# 🪳 Premium Rewards Bot (Telegram)
 
 ## Project Overview
-- **Name**: Canva Invite Bot — @COCKROACHCANVA_bot
-- **Goal**: Grow Telegram channels via a referral-points system that rewards users with Canva Pro team invites
+- **Name**: Premium Rewards Bot — @COCKROACHCANVA_bot
+- **Goal**: Grow Telegram channels via a referral-points system that rewards users with premium product access (Canva Pro, AI Fiesta)
 - **Bot**: https://t.me/COCKROACHCANVA_bot
 - **Channel**: @COCKROCHES12 (COCKROACH CYBER PARTY 🦗)
+
+## 🛒 Rewards Shop
+| Reward | Cost |
+|--------|------|
+| 🎨 Canva Pro Invite | 3 points |
+| 🤖 AI Fiesta — 1 Month | 4 points |
 
 ## How It Works
 1. User starts the bot → must join required channel(s) → gets **+1 welcome point**
 2. User shares their unique referral link → each friend who joins bot **and** channels = **+1 point**
-3. **3 points = 1 Canva Pro invite**
-4. User taps 🎁 Get Canva Invite → sends their Gmail → **admin receives a private message with the email + ✅ Invite Sent / ❌ Reject buttons**
-5. Admin invites the email in Canva manually, taps ✅ → user gets notified automatically
-6. ❌ Reject refunds the user's 3 points
+3. User picks a reward from the shop → sends their Gmail → **admin receives a private message with the email + ✅ Delivered / ❌ Reject buttons**
+4. Admin delivers the reward to the email manually, taps ✅ → user gets notified automatically
+5. ❌ Reject refunds the full points spent on that request
 
 ## Features (Completed)
 - ✅ Forced channel-join verification (via `getChatMember`, bot must be channel admin)
 - ✅ Referral system with anti-self-referral and once-per-user counting
-- ✅ Points economy: +1 welcome, +1 per referral, −3 per invite (refund on reject)
+- ✅ Points economy: +1 welcome, +1 per referral; per-product costs with accurate refunds on reject
+- ✅ Multi-product rewards shop (Canva Pro 3 pts, AI Fiesta 1-month 4 pts) — easily extensible catalog
 - ✅ Email collection flow with validation, cancel button, one-pending-request limit
 - ✅ Admin approval workflow with inline ✅/❌ buttons and in-place message updates
 - ✅ Clean-chat UI: menus edit in place (photo caption editing) instead of stacking messages
@@ -36,9 +42,9 @@
 - **Storage**: Cloudflare D1 (SQLite)
 - **Tables**:
   - `users` — telegram_id, points, referred_by, joined_channels, welcome/referral flags, awaiting_email state
-  - `redemptions` — invite requests: email, points_spent, status (pending/done/rejected)
+  - `redemptions` — reward requests: product, email, points_spent, status (pending/done/rejected)
   - `settings` — key-value config (channels list, cached banner file_id)
-- **Migrations**: `migrations/0001_initial_schema.sql`, `migrations/0002_email_redemptions.sql`
+- **Migrations**: `migrations/0001_initial_schema.sql`, `0002_email_redemptions.sql`, `0003_products.sql`
 
 ## Environment Variables (secrets — NOT in repo)
 Set via `.dev.vars` locally / Cloudflare secrets in production:
