@@ -21,6 +21,19 @@ const tg = async (token: string, method: string, payload: any) => {
 
 const INVITE_COST = 3 // points required for 1 Canva invite
 
+// ============ Products catalog ============
+type Product = { id: string; name: string; emoji: string; cost: number; deliverText: string }
+const PRODUCTS: Record<string, Product> = {
+  canva: {
+    id: 'canva', name: 'Canva Pro Invite', emoji: '🎨', cost: 3,
+    deliverText: 'Check the inbox — open the email from Canva and accept the team invite.'
+  },
+  aifiesta: {
+    id: 'aifiesta', name: 'AI Fiesta — 1 Month', emoji: '🤖', cost: 4,
+    deliverText: 'Check the inbox — your AI Fiesta 1-month access details have been sent to your email.'
+  }
+}
+
 const sendMessage = (token: string, chat_id: number | string, text: string, extra: any = {}) =>
   tg(token, 'sendMessage', { chat_id, text, parse_mode: 'HTML', disable_web_page_preview: true, ...extra })
 
@@ -118,7 +131,8 @@ const joinKeyboard = (channels: string[]) => ({
 const mainMenuKeyboard = {
   inline_keyboard: [
     [{ text: '🔄 Refresh', callback_data: 'my_points' }, { text: '🔗 My Referral Link', callback_data: 'ref_link' }],
-    [{ text: `🎁 Get Canva Invite (${INVITE_COST} points)`, callback_data: 'redeem' }],
+    [{ text: `🎨 Canva Pro (${PRODUCTS.canva.cost} pts)`, callback_data: 'redeem_canva' }],
+    [{ text: `🤖 AI Fiesta 1 Month (${PRODUCTS.aifiesta.cost} pts)`, callback_data: 'redeem_aifiesta' }],
     [{ text: 'ℹ️ How It Works', callback_data: 'help' }]
   ]
 }
@@ -126,13 +140,15 @@ const mainMenuKeyboard = {
 const EMAIL_RE = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/
 
 const mainMenuText = (u: any) =>
-  `🎨 <b>Canva Invite Bot</b>\n\n` +
+  `🎨 <b>Premium Rewards Bot</b>\n\n` +
   `👋 Hi <b>${u.first_name ?? 'there'}</b>!\n\n` +
-  `💰 Your points: <b>${u.points}</b> / ${INVITE_COST}\n` +
+  `💰 Your points: <b>${u.points}</b>\n` +
   `👥 Your referrals: <b>${u.total_referrals}</b>\n` +
-  `🎁 Invites redeemed: <b>${u.total_redeemed}</b>\n\n` +
-  `<b>${INVITE_COST} points = 1 Canva Pro invite</b>\n` +
-  `Each friend who joins via your link = +1 point!`
+  `🎁 Rewards claimed: <b>${u.total_redeemed}</b>\n\n` +
+  `🛒 <b>Rewards Shop:</b>\n` +
+  `🎨 Canva Pro Invite — <b>${PRODUCTS.canva.cost} points</b>\n` +
+  `🤖 AI Fiesta 1 Month — <b>${PRODUCTS.aifiesta.cost} points</b>\n\n` +
+  `Each friend who joins via your link = <b>+1 point</b>!`
 
 const joinPromptText = (channels: string[]) =>
   `🎨 <b>Welcome to Canva Invite Bot!</b>\n\n` +
@@ -193,66 +209,69 @@ const handleVerified = async (env: Bindings, user: any, botUsername: string, cha
 }
 
 // Step 1 of redeem: check points and ask for the user's email
-const handleRedeem = async (env: Bindings, user: any, chatId: number, cbId: string, editMsgId?: number, isPhoto = false) => {
+const handleRedeem = async (env: Bindings, user: any, chatId: number, cbId: string, product: Product, editMsgId?: number, isPhoto = false) => {
   const db = env.DB
 
-  if (user.points < INVITE_COST) {
-    await answerCallback(env.BOT_TOKEN, cbId, `❌ You need ${INVITE_COST} points (you have ${user.points}). Invite ${INVITE_COST - user.points} more friend(s)!`, true)
+  if (user.points < product.cost) {
+    await answerCallback(env.BOT_TOKEN, cbId, `❌ ${product.name} costs ${product.cost} points (you have ${user.points}). Invite ${product.cost - user.points} more friend(s)!`, true)
     return
   }
 
   // Prevent stacking multiple pending requests
   const pending = await db.prepare("SELECT id FROM redemptions WHERE telegram_id = ? AND status = 'pending'").bind(user.telegram_id).first<any>()
   if (pending) {
-    await answerCallback(env.BOT_TOKEN, cbId, '⏳ You already have a pending invite request. Please wait for approval.', true)
+    await answerCallback(env.BOT_TOKEN, cbId, '⏳ You already have a pending request. Please wait for approval.', true)
     return
   }
 
-  await db.prepare('UPDATE users SET awaiting_email = 1 WHERE telegram_id = ?').bind(user.telegram_id).run()
+  await db.prepare('UPDATE users SET awaiting_email = 1, awaiting_product = ? WHERE telegram_id = ?').bind(product.id, user.telegram_id).run()
   await answerCallback(env.BOT_TOKEN, cbId)
   await editOrSend(env.BOT_TOKEN, chatId, editMsgId,
-    `📧 <b>Almost there!</b>\n\n` +
-    `Send me the <b>Gmail address</b> you use for Canva.\n\n` +
+    `${product.emoji} <b>${product.name}</b>\n\n` +
+    `📧 Send me the <b>Gmail address</b> where you want to receive it.\n\n` +
     `Example: <code>yourname@gmail.com</code>\n\n` +
-    `💰 Cost: <b>${INVITE_COST} points</b> • The admin will send the invite to your email. ✅`,
+    `💰 Cost: <b>${product.cost} points</b> • The admin will deliver it to your email. ✅`,
     { reply_markup: { inline_keyboard: [[{ text: '❌ Cancel', callback_data: 'cancel_email' }]] } }, isPhoto)
 }
 
 // Step 2 of redeem: user submitted an email
 const handleEmailSubmission = async (env: Bindings, user: any, chatId: number, email: string) => {
   const db = env.DB
+  const product = PRODUCTS[user.awaiting_product] ?? PRODUCTS.canva
 
-  if (user.points < INVITE_COST) {
-    await db.prepare('UPDATE users SET awaiting_email = 0 WHERE telegram_id = ?').bind(user.telegram_id).run()
-    await sendMessage(env.BOT_TOKEN, chatId, `❌ Not enough points — you need ${INVITE_COST}. Invite friends to earn more!`, { reply_markup: mainMenuKeyboard })
+  if (user.points < product.cost) {
+    await db.prepare('UPDATE users SET awaiting_email = 0, awaiting_product = NULL WHERE telegram_id = ?').bind(user.telegram_id).run()
+    await sendMessage(env.BOT_TOKEN, chatId, `❌ Not enough points — ${product.name} needs ${product.cost}. Invite friends to earn more!`, { reply_markup: mainMenuKeyboard })
     return
   }
 
   // Deduct points + create pending redemption
-  await db.prepare('UPDATE users SET points = points - ?, total_redeemed = total_redeemed + 1, awaiting_email = 0 WHERE telegram_id = ?')
-    .bind(INVITE_COST, user.telegram_id).run()
-  const r = await db.prepare("INSERT INTO redemptions (telegram_id, points_spent, email, status) VALUES (?, ?, ?, 'pending')")
-    .bind(user.telegram_id, INVITE_COST, email).run()
+  await db.prepare('UPDATE users SET points = points - ?, total_redeemed = total_redeemed + 1, awaiting_email = 0, awaiting_product = NULL WHERE telegram_id = ?')
+    .bind(product.cost, user.telegram_id).run()
+  const r = await db.prepare("INSERT INTO redemptions (telegram_id, points_spent, email, status, product) VALUES (?, ?, ?, 'pending', ?)")
+    .bind(user.telegram_id, product.cost, email, product.id).run()
   const redemptionId = r.meta.last_row_id
 
   await sendMessage(env.BOT_TOKEN, chatId,
     `✅ <b>Request submitted!</b>\n\n` +
+    `${product.emoji} Reward: <b>${product.name}</b>\n` +
     `📧 Email: <code>${email}</code>\n` +
-    `💰 ${INVITE_COST} points deducted.\n\n` +
-    `⏳ The admin will send your Canva Pro invite soon. You'll get a message here when it's done! 🎨`)
+    `💰 ${product.cost} points deducted.\n\n` +
+    `⏳ The admin will deliver it soon. You'll get a message here when it's done!`)
 
   // Notify all admins with action buttons
   const ids = (env.ADMIN_IDS || '').split(',').map(s => s.trim()).filter(Boolean)
   for (const adminId of ids) {
     try {
       await sendMessage(env.BOT_TOKEN, adminId,
-        `🎁 <b>New Canva Invite Request #${redemptionId}</b>\n\n` +
+        `${product.emoji} <b>New ${product.name} Request #${redemptionId}</b>\n\n` +
         `👤 User: ${user.first_name ?? ''} (@${user.username ?? 'no_username'})\n` +
         `🆔 ID: <code>${user.telegram_id}</code>\n` +
-        `📧 Email: <code>${email}</code>\n\n` +
-        `👉 Open Canva → People → Invite → paste this email, then tap a button:`,
+        `📧 Email: <code>${email}</code>\n` +
+        `💰 Cost: ${product.cost} points\n\n` +
+        `👉 Deliver <b>${product.name}</b> to this email, then tap a button:`,
         { reply_markup: { inline_keyboard: [[
-          { text: '✅ Invite Sent', callback_data: `adm_done_${redemptionId}` },
+          { text: '✅ Delivered', callback_data: `adm_done_${redemptionId}` },
           { text: '❌ Reject (refund)', callback_data: `adm_rej_${redemptionId}` }
         ]] } })
     } catch {}
@@ -268,25 +287,27 @@ const handleAdminDecision = async (env: Bindings, cb: any, action: 'done' | 'rej
   if (!red) { await answerCallback(token, cb.id, '❌ Request not found.', true); return }
   if (red.status !== 'pending') { await answerCallback(token, cb.id, `⚠️ Already handled (${red.status}).`, true); return }
 
+  const redProduct = PRODUCTS[red.product] ?? PRODUCTS.canva
+
   if (action === 'done') {
     await db.prepare("UPDATE redemptions SET status = 'done', handled_at = CURRENT_TIMESTAMP WHERE id = ?").bind(redemptionId).run()
-    await answerCallback(token, cb.id, '✅ Marked as done!')
+    await answerCallback(token, cb.id, '✅ Marked as delivered!')
     try {
       await sendMessage(token, red.telegram_id,
-        `🎉 <b>Your Canva Pro invite has been sent!</b>\n\n` +
-        `📧 Check the inbox of <code>${red.email}</code> (also check Spam folder).\n` +
-        `Open the email from Canva and accept the invite. Enjoy! 🎨\n\n` +
+        `🎉 <b>Your ${redProduct.name} has been delivered!</b> ${redProduct.emoji}\n\n` +
+        `📧 <code>${red.email}</code> (also check Spam folder).\n` +
+        `${redProduct.deliverText}\n\n` +
         `💡 Invite more friends to earn more points!`)
     } catch {}
   } else {
     // Refund the points actually spent on this request
-    const refund = red.points_spent ?? INVITE_COST
+    const refund = red.points_spent ?? redProduct.cost
     await db.prepare("UPDATE redemptions SET status = 'rejected', handled_at = CURRENT_TIMESTAMP WHERE id = ?").bind(redemptionId).run()
     await db.prepare('UPDATE users SET points = points + ?, total_redeemed = total_redeemed - 1 WHERE telegram_id = ?').bind(refund, red.telegram_id).run()
     await answerCallback(token, cb.id, `❌ Rejected, ${refund} point(s) refunded.`)
     try {
       await sendMessage(token, red.telegram_id,
-        `⚠️ Your Canva invite request for <code>${red.email}</code> was rejected.\n` +
+        `⚠️ Your ${redProduct.name} request for <code>${red.email}</code> was rejected.\n` +
         `💰 Your <b>${refund} points</b> have been <b>refunded</b>.\n\n` +
         `Please check the email is correct and try again, or contact the admin.`)
     } catch {}
@@ -299,7 +320,7 @@ const handleAdminDecision = async (env: Bindings, cb: any, action: 'done' | 'rej
       message_id: cb.message.message_id,
       parse_mode: 'HTML',
       text: cb.message.text.replace(/👉[^]*$/, '') +
-        (action === 'done' ? `\n✅ <b>DONE</b> — invite sent to ${red.email}` : `\n❌ <b>REJECTED</b> — point refunded`)
+        (action === 'done' ? `\n✅ <b>DONE</b> — ${redProduct.name} delivered to ${red.email}` : `\n❌ <b>REJECTED</b> — points refunded`)
     })
   } catch {}
 }
@@ -358,7 +379,7 @@ const handleAdminCommand = async (env: Bindings, msg: any): Promise<boolean> => 
       `👥 Total users: <b>${s.total_users}</b>\n` +
       `✅ Verified (joined channels): <b>${s.verified_users}</b>\n` +
       `💰 Points outstanding: <b>${s.points_outstanding}</b>\n` +
-      `🎁 Invites redeemed: <b>${s.total_redemptions}</b>\n` +
+      `🎁 Rewards redeemed: <b>${s.total_redemptions}</b>\n` +
       `🔗 Referrals counted: <b>${s.total_referrals}</b>\n\n` +
       `📢 Channels: ${chans.length ? chans.join(', ') : '⚠️ not set'}\n` +
       `🎨 Canva link: ${link ? '✅ set' : '⚠️ not set'}`)
@@ -396,17 +417,18 @@ const handleAdminCommand = async (env: Bindings, msg: any): Promise<boolean> => 
   }
 
   if (text.startsWith('/pending')) {
-    const rows = await db.prepare("SELECT r.id, r.email, r.created_at, u.username, u.first_name, u.telegram_id FROM redemptions r JOIN users u ON u.telegram_id = r.telegram_id WHERE r.status = 'pending' ORDER BY r.id").all<any>()
+    const rows = await db.prepare("SELECT r.id, r.email, r.created_at, r.product, u.username, u.first_name, u.telegram_id FROM redemptions r JOIN users u ON u.telegram_id = r.telegram_id WHERE r.status = 'pending' ORDER BY r.id").all<any>()
     const list = rows.results ?? []
     if (!list.length) {
-      await sendMessage(env.BOT_TOKEN, chatId, '✅ No pending invite requests!')
+      await sendMessage(env.BOT_TOKEN, chatId, '✅ No pending requests!')
       return true
     }
     for (const r of list) {
+      const p = PRODUCTS[r.product] ?? PRODUCTS.canva
       await sendMessage(env.BOT_TOKEN, chatId,
-        `🎁 <b>Request #${r.id}</b>\n👤 ${r.first_name ?? ''} (@${r.username ?? 'no_username'})\n📧 <code>${r.email}</code>\n🕐 ${r.created_at}`,
+        `${p.emoji} <b>Request #${r.id} — ${p.name}</b>\n👤 ${r.first_name ?? ''} (@${r.username ?? 'no_username'})\n📧 <code>${r.email}</code>\n🕐 ${r.created_at}`,
         { reply_markup: { inline_keyboard: [[
-          { text: '✅ Invite Sent', callback_data: `adm_done_${r.id}` },
+          { text: '✅ Delivered', callback_data: `adm_done_${r.id}` },
           { text: '❌ Reject (refund)', callback_data: `adm_rej_${r.id}` }
         ]] } })
     }
@@ -470,6 +492,7 @@ const handleUpdate = async (env: Bindings, update: any, origin: string) => {
     if (cb.data === 'cancel_email') {
       await db.prepare('UPDATE users SET awaiting_email = 0 WHERE telegram_id = ?').bind(from.id).run()
       await answerCallback(token, cb.id, '❌ Cancelled. No points used.')
+      await db.prepare('UPDATE users SET awaiting_product = NULL WHERE telegram_id = ?').bind(from.id).run()
       const fresh = await getUser(db, from.id)
       await editOrSend(token, chatId, msgId, mainMenuText(fresh), { reply_markup: mainMenuKeyboard }, isPhoto)
       return
@@ -496,19 +519,22 @@ const handleUpdate = async (env: Bindings, update: any, origin: string) => {
         `<code>https://t.me/${botUsername}?start=ref_${from.id}</code>\n\n` +
         `👆 Tap the link to copy it, then share with friends!\n\n` +
         `💰 Each friend who joins the bot <b>and</b> all channels = <b>+1 point</b>\n` +
-        `🎁 Collect <b>${INVITE_COST} points</b> → 1 Canva Pro invite! 🎨`,
+        `🎨 ${PRODUCTS.canva.cost} pts = Canva Pro • 🤖 ${PRODUCTS.aifiesta.cost} pts = AI Fiesta 1 Month!`,
         { reply_markup: { inline_keyboard: [[{ text: '⬅️ Back to Menu', callback_data: 'back_menu' }]] } }, isPhoto)
-    } else if (cb.data === 'redeem') {
+    } else if (cb.data === 'redeem_canva' || cb.data === 'redeem_aifiesta' || cb.data === 'redeem') {
+      const product = cb.data === 'redeem_aifiesta' ? PRODUCTS.aifiesta : PRODUCTS.canva
       const fresh = await getUser(db, from.id)
-      await handleRedeem(env, fresh, chatId, cb.id, msgId, isPhoto)
+      await handleRedeem(env, fresh, chatId, cb.id, product, msgId, isPhoto)
     } else if (cb.data === 'help') {
       await answerCallback(token, cb.id)
       await editOrSend(token, chatId, msgId,
         `ℹ️ <b>How It Works</b>\n\n` +
         `1️⃣ Join our channel(s) → get <b>+1 free point</b>\n` +
         `2️⃣ Share your referral link — each friend who joins bot + channels = <b>+1 point</b>\n` +
-        `3️⃣ Collect <b>${INVITE_COST} points</b> = 1 Canva Pro invite\n` +
-        `4️⃣ Tap 🎁 Get Canva Invite → send your Gmail → invite arrives in your email 📧\n\n` +
+        `3️⃣ Spend points in the 🛒 Rewards Shop:\n` +
+        `   🎨 Canva Pro Invite — ${PRODUCTS.canva.cost} pts\n` +
+        `   🤖 AI Fiesta 1 Month — ${PRODUCTS.aifiesta.cost} pts\n` +
+        `4️⃣ Send your Gmail → reward arrives in your email 📧\n\n` +
         `♾️ No limits — keep inviting, keep earning!`,
         { reply_markup: { inline_keyboard: [[{ text: '⬅️ Back to Menu', callback_data: 'back_menu' }]] } }, isPhoto)
     }
